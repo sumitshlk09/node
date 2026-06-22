@@ -296,10 +296,9 @@ TEST(GenericPrinterTest, Map) {
 TEST(GenericPrinterTest, StreamAdapter) {
   std::stringstream ss;
   static_assert(
-      std::is_same<
-          typename std::remove_reference<decltype(ss << GenericPrint())>::type,
-          internal_generic_printer::GenericPrintStreamAdapter::Impl<
-              std::stringstream>>::value,
+      std::is_same<std::remove_reference_t<decltype(ss << GenericPrint())>,
+                   internal_generic_printer::GenericPrintStreamAdapter::Impl<
+                       std::stringstream>>::value,
       "expected ostream << GenericPrint() to yield adapter impl");
 
   ss << GenericPrint() << "again, " << "back-up, " << "cue, "
@@ -373,6 +372,10 @@ TEST(GenericPrinterTest, Optional) {
                                    generic_logging_test::Streamable{3})));
 }
 
+TEST(GenericPrinterTest, Monostate) {
+  EXPECT_EQ("monostate", GenericPrintToString(std::monostate{}));
+}
+
 TEST(GenericPrinterTest, Tuple) {
   EXPECT_EQ("<1, two, 3>", GenericPrintToString(std::make_tuple(1, "two", 3)));
 }
@@ -396,8 +399,8 @@ TEST(GenericPrinterTest, Variant) {
 }
 
 TEST(GenericPrinterTest, VariantMonostate) {
-  EXPECT_THAT(GenericPrintToString(std::variant<std::monostate, std::string>()),
-              IsUnprintable());
+  EXPECT_EQ("('(index = 0)' monostate)",
+            GenericPrintToString(std::variant<std::monostate, std::string>()));
 }
 
 TEST(GenericPrinterTest, VariantNonStreamable) {

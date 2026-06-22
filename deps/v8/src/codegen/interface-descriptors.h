@@ -17,9 +17,9 @@
 namespace v8 {
 namespace internal {
 
-#define TORQUE_BUILTIN_LIST_TFC(V)                               \
-  BUILTIN_LIST_FROM_TORQUE(IGNORE_BUILTIN, IGNORE_BUILTIN, V, V, \
-                           IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
+#define TORQUE_BUILTIN_LIST_TFC(V)                                            \
+  BUILTIN_LIST_FROM_TORQUE(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, V, \
+                           V, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
 
 #define INTERFACE_DESCRIPTOR_LIST(V)                            \
   V(Abort)                                                      \
@@ -42,7 +42,8 @@ namespace internal {
   V(BinaryOp)                                                   \
   V(BinaryOp_Baseline)                                          \
   V(BinaryOp_WithFeedback)                                      \
-  V(BinarySmiOp_Baseline)                                       \
+  V(BinaryOp_WithEmbeddedFeedback)                              \
+  V(BinaryOp_WithEmbeddedFeedbackOffset)                        \
   V(CallForwardVarargs)                                         \
   V(CallFunctionTemplate)                                       \
   V(CallFunctionTemplateGeneric)                                \
@@ -91,6 +92,10 @@ namespace internal {
   V(FastNewObject)                                              \
   V(FindNonDefaultConstructorOrConstruct)                       \
   V(ForInPrepare)                                               \
+  V(ForOfNextResultDeoptContinuation)                           \
+  V(ForOfNextLoadDoneLazyDeoptContinuation)                     \
+  V(ForOfNextLoadValueEagerDeoptContinuation)                   \
+  V(ForOfNextLoadValueLazyDeoptContinuation)                    \
   V(GetIteratorStackParameter)                                  \
   V(GetProperty)                                                \
   V(GrowArrayElements)                                          \
@@ -155,7 +160,9 @@ namespace internal {
   IF_WASM(V, WasmAllocateShared)                                \
   IF_WASM(V, WasmFXResume)                                      \
   IF_WASM(V, WasmFXResumeThrow)                                 \
+  IF_WASM(V, WasmFXResumeThrowRef)                              \
   IF_WASM(V, WasmFXSuspend)                                     \
+  IF_WASM(V, WasmFXSwitch)                                      \
   IF_WASM(V, WasmFXReturn)                                      \
   V(WasmDummy)                                                  \
   V(WasmFloat32ToNumber)                                        \
@@ -945,6 +952,22 @@ class WasmFXResumeThrowDescriptor final
   static constexpr inline auto registers();
 };
 
+class WasmFXResumeThrowRefDescriptor final
+    : public StaticCallInterfaceDescriptor<WasmFXResumeThrowRefDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS_NO_CONTEXT(1, kTargetStack, kExnRef)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(
+      MachineType::IntPtr(),         // Return: result buffer.
+      MachineType::IntPtr(),         // Param 0: target stack.
+      MachineType::TaggedPointer())  // Param 1: exnref.
+  DECLARE_DESCRIPTOR(WasmFXResumeThrowRefDescriptor)
+
+  static constexpr int kMaxRegisterParams = 2;
+  static constexpr inline auto registers();
+};
+
 class WasmFXSuspendDescriptor final
     : public StaticCallInterfaceDescriptor<WasmFXSuspendDescriptor> {
   INTERNAL_DESCRIPTOR()
@@ -955,11 +978,31 @@ class WasmFXSuspendDescriptor final
       MachineType::TaggedPointer(),  // Param 0: tag.
       MachineType::TaggedPointer(),  // Param 1: continuation.
       MachineType::IntPtr(),         // Param 2: arg buffer.
-      MachineType::IntPtr())         // Param 3: sig.
+      MachineType::Int32())          // Param 3: canonical sig index.
   DECLARE_DESCRIPTOR(WasmFXSuspendDescriptor)
 
   static constexpr bool kNoStackScan = true;
   static constexpr int kMaxRegisterParams = 3;
+  static constexpr inline auto registers();
+};
+
+class WasmFXSwitchDescriptor final
+    : public StaticCallInterfaceDescriptor<WasmFXSwitchDescriptor> {
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kTag, kContinuation, kTargetStack, kArgBuffer,
+                               kSig)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(
+      MachineType::IntPtr(),         // Result: arg buffer
+      MachineType::TaggedPointer(),  // Param 0: tag.
+      MachineType::TaggedPointer(),  // Param 1: continuation.
+      MachineType::IntPtr(),         // Param 2: target stack.
+      MachineType::IntPtr(),         // Param 3: arg buffer.
+      MachineType::Int32())          // Param 4: canonical sig index.
+  DECLARE_DESCRIPTOR(WasmFXSwitchDescriptor)
+
+  static constexpr bool kNoStackScan = true;
+  static constexpr int kMaxRegisterParams = 4;
   static constexpr inline auto registers();
 };
 
@@ -1788,6 +1831,63 @@ class GetIteratorStackParameterDescriptor final
   static constexpr auto registers();
 };
 
+class ForOfNextResultDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextResultDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kResultObject)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged())  // kResultObject
+  DECLARE_DESCRIPTOR(ForOfNextResultDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextLoadDoneLazyDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextLoadDoneLazyDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kResultObject, kDone)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged(),  // kResultObject
+                                    MachineType::AnyTagged())  // kDone
+  DECLARE_DESCRIPTOR(ForOfNextLoadDoneLazyDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextLoadValueEagerDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextLoadValueEagerDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kResultObject)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged())  // kResultObject
+  DECLARE_DESCRIPTOR(ForOfNextLoadValueEagerDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextLoadValueLazyDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextLoadValueLazyDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged())  // kValue
+  DECLARE_DESCRIPTOR(ForOfNextLoadValueLazyDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
 class GetPropertyDescriptor final
     : public StaticCallInterfaceDescriptor<GetPropertyDescriptor> {
  public:
@@ -2257,19 +2357,6 @@ class BinaryOp_BaselineDescriptor
   static constexpr inline auto registers();
 };
 
-class BinarySmiOp_BaselineDescriptor
-    : public StaticCallInterfaceDescriptor<BinarySmiOp_BaselineDescriptor> {
- public:
-  INTERNAL_DESCRIPTOR()
-  SANDBOXING_MODE(kSandboxed)
-  DEFINE_PARAMETERS_NO_CONTEXT(kLeft, kRight, kSlot)
-  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kLeft
-                         MachineType::TaggedSigned(),  // kRight
-                         MachineType::UintPtr())       // kSlot
-  DECLARE_DESCRIPTOR(BinarySmiOp_BaselineDescriptor)
-
-  static constexpr inline auto registers();
-};
 
 class StringAtAsStringDescriptor final
     : public StaticCallInterfaceDescriptor<StringAtAsStringDescriptor> {
@@ -2885,6 +2972,35 @@ class BinaryOp_WithFeedbackDescriptor
                          MachineType::UintPtr(),    // kSlot
                          MachineType::AnyTagged())  // kFeedbackVector
   DECLARE_DESCRIPTOR(BinaryOp_WithFeedbackDescriptor)
+};
+
+class BinaryOp_WithEmbeddedFeedbackDescriptor
+    : public StaticCallInterfaceDescriptor<
+          BinaryOp_WithEmbeddedFeedbackDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_PARAMETERS(kLeft, kRight, kFeedbackOffset, kBytecodeArray)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kLeft
+                         MachineType::AnyTagged(),  // kRight
+                         MachineType::UintPtr(),    // kFeedbackOffset
+                         MachineType::AnyTagged())  // kBytecodeArray
+  DECLARE_DESCRIPTOR(BinaryOp_WithEmbeddedFeedbackDescriptor)
+};
+
+class BinaryOp_WithEmbeddedFeedbackOffsetDescriptor
+    : public StaticCallInterfaceDescriptor<
+          BinaryOp_WithEmbeddedFeedbackOffsetDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_PARAMETERS_NO_CONTEXT(kLeft, kRight, kFeedbackOffset)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kLeft
+                         MachineType::AnyTagged(),  // kRight
+                         MachineType::UintPtr())    // kFeedbackOffset
+  DECLARE_DESCRIPTOR(BinaryOp_WithEmbeddedFeedbackOffsetDescriptor)
+
+  static constexpr inline auto registers();
 };
 
 class CallTrampoline_Baseline_CompactDescriptor

@@ -123,7 +123,6 @@ def _default_args():
                 "-Wno-implicit-int-float-conversion",
                 "-Wno-deprecated-copy",
                 "-Wno-non-virtual-dtor",
-                "-Wno-unnecessary-virtual-specifier",
                 "-isystem .",
             ],
             "//conditions:default": [],
@@ -352,8 +351,6 @@ def _torque_files_impl(ctx):
         if root[:len(v8root)] == v8root:
             root = root[len(v8root):]
         file = ctx.attr.prefix + "/torque-generated/" + root
-        defs.append(ctx.actions.declare_file(file + "-tq-inl.inc"))
-        defs.append(ctx.actions.declare_file(file + "-tq.inc"))
         defs.append(ctx.actions.declare_file(file + "-tq.cc"))
         inits.append(ctx.actions.declare_file(file + "-tq-csa.cc"))
         inits.append(ctx.actions.declare_file(file + "-tq-csa.h"))
@@ -467,6 +464,7 @@ def _mksnapshot(ctx):
     ctx.actions.run(
         outputs = outs,
         inputs = [],
+        mnemonic = "V8Mksnapshot",
         arguments = [
             "--embedded_variant=Default",
             "--target_os",
@@ -564,9 +562,11 @@ def build_config_content(cpu, icu):
         ("dict_property_const_tracking", "false"),
         ("direct_handle", "false"),
         ("disassembler", "false"),
+        ("dumpling", "false"),
         ("full_debug", "false"),
         ("gdbjit", "false"),
         ("has_jitless", "false"),
+        ("sparkplug_plus", "true" if cpu in ['"x64"', '"arm64"'] else "false"),
         ("has_maglev", "true"),
         ("has_turbofan", "true"),
         ("has_webassembly", "false"),
@@ -574,6 +574,7 @@ def build_config_content(cpu, icu):
         ("i18n", icu),
         ("is_android", "false"),
         ("is_ios", "false"),
+        ("is_linux", "true"),
         ("js_shared_memory", "false"),
         ("leaptiering", "true"),
         ("lite_mode", "false"),
@@ -595,6 +596,7 @@ def build_config_content(cpu, icu):
         ("single_generation", "false"),
         ("slow_dchecks", "false"),
         ("target_cpu", cpu),
+        ("temporal", "false"),
         ("tsan", "false"),
         ("ubsan", "false"),
         ("use_sanitizer", "false"),

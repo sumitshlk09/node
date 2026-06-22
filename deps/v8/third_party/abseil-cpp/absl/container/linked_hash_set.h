@@ -238,21 +238,24 @@ class linked_hash_set {
   }
 
   linked_hash_set& operator=(const linked_hash_set& other) {
-    if (this == &other) return *this;
-    // Make a new set, with other's hash/eq/alloc.
-    set_ = SetType(other.bucket_count(), other.set_.hash_function(),
-                   other.set_.key_eq(), other.get_allocator());
-    // Copy the list, with other's allocator.
-    list_ = ListType(other.get_allocator());
-    CopyFrom(other);
+    if (this != &other) {
+      // Make a new set, with other's hash/eq/alloc.
+      set_ = SetType(other.bucket_count(), other.set_.hash_function(),
+                     other.set_.key_eq(), other.get_allocator());
+      // Copy the list, with other's allocator.
+      list_ = ListType(other.get_allocator());
+      CopyFrom(other);
+    }
     return *this;
   }
 
   linked_hash_set& operator=(linked_hash_set&& other) noexcept {
-    set_ = std::move(other.set_);
-    list_ = std::move(other.list_);
-    other.set_.clear();
-    other.list_.clear();
+    if (this != &other) {
+      set_ = std::move(other.set_);
+      list_ = std::move(other.list_);
+      other.set_.clear();
+      other.list_.clear();
+    }
     return *this;
   }
 
@@ -447,8 +450,8 @@ class linked_hash_set {
     return node_type(std::move(extracted_node_list));
   }
 
-  template <class K = key_type, typename std::enable_if_t<
-                                    !std::is_same<K, iterator>::value, int> = 0>
+  template <class K = key_type,
+            typename std::enable_if_t<!std::is_same_v<K, iterator>, int> = 0>
   node_type extract(const key_arg<K>& key) {
     auto node = set_.extract(key);
     if (node.empty()) return node_type();

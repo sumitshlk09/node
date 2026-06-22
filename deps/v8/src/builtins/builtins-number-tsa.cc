@@ -94,11 +94,11 @@ class NumberBuiltinsAssemblerTS
 
     BIND(if_int);
     {
-      // Check if AdditiveSafeInteger: (value - kMinAdditiveSafeInteger) >> 53
-      // == 0
-      V<Word64> shifted_value =
-          Word64ShiftRightLogical(Word64Sub(value_i64, kMinAdditiveSafeInteger),
-                                  kAdditiveSafeIntegerBitLength);
+      // Check if AdditiveSafeIntegerFeedback: (value -
+      // kMinAdditiveSafeIntegerFeedback) >> 51 == 0
+      V<Word64> shifted_value = Word64ShiftRightLogical(
+          Word64Sub(value_i64, kMinAdditiveSafeIntegerFeedback),
+          kAdditiveSafeIntegerFeedbackBitLength);
       GOTO_IF_NOT(Word64Equal(shifted_value, 0), if_fail);
       return value_i64;
     }
@@ -402,12 +402,11 @@ TS_BUILTIN(Add_WithFeedback, NumberBuiltinsAssemblerTS) {
   V<Object> lhs = Parameter<Object>(Descriptor::kLeft);
   V<Object> rhs = Parameter<Object>(Descriptor::kRight);
   V<Context> context = Parameter<Context>(Descriptor::kContext);
-  V<FeedbackVector> feedback_vector =
-      Parameter<FeedbackVector>(Descriptor::kFeedbackVector);
-  V<WordPtr> slot = Parameter<WordPtr>(Descriptor::kSlot);
+  V<BytecodeArray> bytecode_array =
+      Parameter<BytecodeArray>(Descriptor::kBytecodeArray);
+  V<WordPtr> feedback_offset = Parameter<WordPtr>(Descriptor::kFeedbackOffset);
 
-  SetFeedbackSlot(slot);
-  SetFeedbackVector(feedback_vector);
+  SetEmbeddedFeedback(bytecode_array, feedback_offset);
 
   V<Object> result = AddWithFeedback(
       context, lhs, rhs, UpdateFeedbackMode::kGuaranteedFeedback, false);

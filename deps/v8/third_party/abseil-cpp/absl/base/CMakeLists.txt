@@ -32,11 +32,40 @@ absl_cc_library(
 # Internal-only target, do not depend on directly.
 absl_cc_library(
   NAME
+    base_cpu_detect
+  HDRS
+    "internal/cpu_detect.h"
+  SRCS
+    "internal/cpu_detect.cc"
+  DEPS
+    absl::base
+    absl::config
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+)
+
+# Internal-only target, do not depend on directly.
+absl_cc_library(
+  NAME
     errno_saver
   HDRS
     "internal/errno_saver.h"
   DEPS
     absl::config
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+)
+
+absl_cc_library(
+  NAME
+    hardening
+  HDRS
+    "internal/hardening.h"
+  SRCS
+    "internal/hardening.cc"
+  DEPS
+    absl::config
+    absl::core_headers
   COPTS
     ${ABSL_DEFAULT_COPTS}
 )
@@ -288,14 +317,13 @@ absl_cc_library(
   PUBLIC
 )
 
-# Internal-only target, do not depend on directly.
 absl_cc_library(
   NAME
     throw_delegate
   HDRS
-    "internal/throw_delegate.h"
+    "throw_delegate.h"
   SRCS
-    "internal/throw_delegate.cc"
+    "throw_delegate.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
@@ -400,6 +428,20 @@ absl_cc_test(
   DEPS
     absl::config
     absl::core_headers
+    GTest::gtest_main
+)
+
+absl_cc_test(
+  NAME
+    hardening_test
+  SRCS
+    "internal/hardening_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::config
+    absl::core_headers
+    absl::hardening
     GTest::gtest_main
 )
 
@@ -764,7 +806,6 @@ absl_cc_test(
     ${ABSL_TEST_COPTS}
   DEPS
     absl::core_headers
-    absl::optional
     GTest::gtest_main
 )
 

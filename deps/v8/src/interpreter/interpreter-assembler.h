@@ -355,7 +355,8 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // Returns a pointer to the current function's BytecodeArray object.
   TNode<BytecodeArray> BytecodeArrayTaggedPointer();
 
-  // Update feedback value embedded in BytecodeArray
+  // Update feedback value embedded in BytecodeArray.
+  template <typename Feedback>
   void UpdateEmbeddedFeedback(TNode<Smi> feedback, int feedback_operand_index);
 
  private:
@@ -382,9 +383,6 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
   // frame when performing a call.
   void CallPrologue();
   void CallEpilogue();
-
-  // Increment the dispatch counter for the (current, next) bytecode pair.
-  void TraceBytecodeDispatch(TNode<WordT> target_bytecode);
 
   // Traces the current bytecode by calling |function_id|.
   void TraceBytecode(Runtime::FunctionId function_id);

@@ -25,6 +25,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "include/v8-data.h"
+#include "include/v8-external.h"
 #include "include/v8-function.h"
 #include "include/v8-locker.h"
 #include "src/api/api-inl.h"
@@ -429,7 +431,8 @@ void MicrotaskLoopForever(const FunctionCallbackInfo<Value>& info) {
   HandleScope scope(isolate);
   // Enqueue another should-not-run task to ensure we clean out the queue
   // when we terminate.
-  isolate->EnqueueMicrotask(
+  isolate->GetCurrentContext()->GetMicrotaskQueue()->EnqueueMicrotask(
+      isolate,
       Function::New(isolate->GetCurrentContext(), MicrotaskShouldNotRun)
           .ToLocalChecked());
   CompileRun(isolate->GetCurrentContext(), "terminate(); while (true) { }");
@@ -447,14 +450,14 @@ TEST_F(ThreadTerminationTest, TerminateFromOtherThreadWhileMicrotaskRunning) {
       CreateGlobalTemplate(isolate(), Signal, DoLoop);
   Local<Context> context = Context::New(isolate(), nullptr, global);
   Context::Scope context_scope(context);
-  isolate()->EnqueueMicrotask(
-      Function::New(isolate()->GetCurrentContext(), MicrotaskLoopForever)
-          .ToLocalChecked());
+  auto* microtask_queue = context->GetMicrotaskQueue();
+  microtask_queue->EnqueueMicrotask(
+      isolate(), Function::New(context, MicrotaskLoopForever).ToLocalChecked());
   // The second task should never be run because we bail out if we're
   // terminating.
-  isolate()->EnqueueMicrotask(
-      Function::New(isolate()->GetCurrentContext(), MicrotaskShouldNotRun)
-          .ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      isolate(),
+      Function::New(context, MicrotaskShouldNotRun).ToLocalChecked());
   isolate()->PerformMicrotaskCheckpoint();
 
   isolate()->CancelTerminateExecution();
@@ -796,12 +799,18 @@ TEST_F(ThreadTerminationTest, TerminateInMicrotask) {
   CHECK(!isolate()->IsExecutionTerminating());
 }
 
-void TerminationMicrotask(void* data) {
-  Isolate::GetCurrent()->TerminateExecution();
-  CompileRun(Isolate::GetCurrent()->GetCurrentContext(), "");
+void TerminationMicrotask(v8::Local<v8::Data> data) {
+  v8::Isolate* isolate = Isolate::GetCurrent();
+  // Make sure the C++ microtask executes code it the right context.
+  CHECK(isolate->GetCurrentContext().IsEmpty());
+  Local<Context> context = *(reinterpret_cast<Local<Context>*>(
+      data.As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault)));
+  isolate->TerminateExecution();
+  Context::Scope context_scope(context);
+  CompileRun(context, "");
 }
 
-void UnreachableMicrotask(void* data) { UNREACHABLE(); }
+void UnreachableMicrotask(v8::Local<v8::Data> data) { UNREACHABLE(); }
 
 TEST_F(ThreadTerminationTest, TerminateInApiMicrotask) {
   Locker locker(isolate());
@@ -812,10 +821,18 @@ TEST_F(ThreadTerminationTest, TerminateInApiMicrotask) {
   Local<Context> context = Context::New(isolate(), nullptr, global);
   {
     TryCatch try_catch(isolate());
-    Context::Scope context_scope(context);
-    CHECK(!isolate()->IsExecutionTerminating());
-    isolate()->EnqueueMicrotask(TerminationMicrotask);
-    isolate()->EnqueueMicrotask(UnreachableMicrotask);
+    {
+      Context::Scope context_scope(context);
+      CHECK(!isolate()->IsExecutionTerminating());
+      auto* microtask_queue = context->GetMicrotaskQueue();
+      microtask_queue->EnqueueMicrotask(
+          isolate(), TerminationMicrotask,
+          v8::External::New(isolate(), &context,
+                            v8::kExternalPointerTypeTagDefault));
+      microtask_queue->EnqueueMicrotask(isolate(), UnreachableMicrotask,
+                                        v8::Undefined(isolate()));
+    }
+    // Trigger microtask checkpoint without active context.
     isolate()->PerformMicrotaskCheckpoint();
     CHECK(try_catch.HasCaught());
     CHECK(try_catch.HasTerminated());

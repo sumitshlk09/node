@@ -81,8 +81,9 @@ struct CppHeapPointerTableEntry {
   // Invalidates the source entry.
   inline void Evacuate(CppHeapPointerTableEntry& dest);
 
-  // Mark this entry as alive during table garbage collection.
-  inline void Mark();
+  // Mark this entry as alive during table garbage collection. Returns true if
+  // the entry transitioned from un-marked to marked, and false otherwise.
+  inline bool Mark();
 
   static constexpr bool IsWriteProtected = false;
 
@@ -182,6 +183,14 @@ class V8_EXPORT_PRIVATE CppHeapPointerTable
   uint32_t SweepAndCompact(Space* space, Counters* counters);
 
   inline bool Contains(Space* space, CppHeapPointerHandle handle) const;
+
+  // Verifies that all entries in the given space are valid.
+  //
+  // In practice, this means that every active entry must point to a valid
+  // (e.g. not freed or corrupted) object of the expected type. As a general
+  // rule, the table must be in a consistent state (and so pass verification)
+  // whenever we can execute JS or Wasm code.
+  void Verify(Isolate* isolate, Space* space);
 
  private:
   static inline bool IsValidHandle(CppHeapPointerHandle handle);

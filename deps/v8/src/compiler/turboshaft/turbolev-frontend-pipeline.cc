@@ -11,6 +11,7 @@
 #include "src/compiler/pipeline-statistics.h"
 #include "src/flags/flags.h"
 #include "src/heap/read-only-heap.h"
+#include "src/init/isolate-group.h"
 #include "src/maglev/maglev-compilation-info.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/maglev/maglev-graph-builder.h"
@@ -18,11 +19,13 @@
 #include "src/maglev/maglev-graph-optimizer.h"
 #include "src/maglev/maglev-graph-printer.h"
 #include "src/maglev/maglev-graph-processor.h"
+#include "src/maglev/maglev-graph-serializer.h"
 #include "src/maglev/maglev-graph-verifier.h"
 #include "src/maglev/maglev-inlining.h"
 #include "src/maglev/maglev-ir-inl.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-kna-processor.h"
+#include "src/maglev/maglev-loop-peeler.h"
 #include "src/maglev/maglev-phi-representation-selector.h"
 #include "src/maglev/maglev-post-hoc-optimizations-processors.h"
 #include "src/maglev/maglev-range-analysis.h"
@@ -34,7 +37,8 @@ namespace v8::internal::compiler::turboshaft {
 // TODO(victorgomes): Should we create a Turbolev phase kind?
 #define DECL_TURBOLEV_PHASE_CONSTANTS_IMPL(Name, CallStatsName)             \
   DECL_PIPELINE_PHASE_CONSTANTS_HELPER(CallStatsName, PhaseKind::kTurbolev, \
-                                       RuntimeCallStats::kThreadSpecific)   \
+                                       RuntimeCallStats::kThreadSpecific,   \
+                                       "Turbolev" #Name)                    \
                                                                             \
   static constexpr char kPhaseName[] = "V8.TF" #CallStatsName;
 
@@ -47,7 +51,8 @@ TurbolevFrontendPipeline::TurbolevFrontendPipeline(PipelineData* data,
       compilation_info_(maglev::MaglevCompilationInfo::NewForTurbolev(
           data->isolate(), data->broker(), data->info()->closure(),
           data->info()->osr_offset(),
-          data->info()->function_context_specializing())) {
+          data->info()->function_context_specializing(),
+          data->info()->debug_name())) {
   // We need to be certain that the parameter count reported by our output
   // Code object matches what the code we compile expects. Otherwise, this
   // may lead to effectively signature mismatches during function calls. This
@@ -59,6 +64,7 @@ TurbolevFrontendPipeline::TurbolevFrontendPipeline(PipelineData* data,
   // TODO(victorgomes): Investigate support for Turbolev without
   // MaglevGraphLabeller
   compilation_info_->set_graph_labeller(new maglev::MaglevGraphLabeller());
+  compilation_info_->set_optimization_id(data->info()->optimization_id());
 }
 
 void TurbolevFrontendPipeline::PrintMaglevGraph(const char* msg) {
@@ -182,6 +188,15 @@ struct InlinerPhase {
   }
 };
 
+struct LoopPeelerPhase {
+  DECL_TURBOLEV_PHASE_CONSTANTS(LoopPeeler)
+
+  bool Run(maglev::Graph* graph) {
+    maglev::MaglevLoopPeeler peeler(graph);
+    return peeler.Run();
+  }
+};
+
 struct TruncationPhase {
   DECL_TURBOLEV_PHASE_CONSTANTS(Truncation)
 
@@ -229,12 +244,15 @@ struct PostOptimizerPhase {
   DECL_TURBOLEV_PHASE_CONSTANTS(PostOptimizer)
 
   bool Run(maglev::Graph* graph, maglev::NodeRanges* ranges) {
-    maglev::RecomputeKnownNodeAspectsProcessor kna_processor(graph);
+    maglev::ReachableExceptionHandlerTracker exception_handler_tracker(graph);
+    maglev::RecomputeKnownNodeAspectsProcessor kna_processor(
+        graph, exception_handler_tracker);
     maglev::MaglevGraphOptimizer optimizer(graph, kna_processor, ranges);
     maglev::GraphMultiProcessor<maglev::MaglevGraphOptimizer&,
+                                maglev::ReachableExceptionHandlerTracker&,
                                 maglev::RecomputeKnownNodeAspectsProcessor&,
                                 maglev::RecomputePhiUseHintsProcessor>
-        optimization_pass(optimizer, kna_processor,
+        optimization_pass(optimizer, exception_handler_tracker, kna_processor,
                           maglev::RecomputePhiUseHintsProcessor{graph->zone()});
     optimization_pass.ProcessGraph(graph);
 
@@ -282,9 +300,14 @@ auto TurbolevFrontendPipeline::Run(Args&&... args) {
                                                  Phase::kCounterMode);
 #endif
   Phase phase;
+  SYNCHRONIZATION_POINT_FOR_TESTING(Phase::synchronization_point_name());
   bool result = phase.Run(graph_, std::forward<Args>(args)...);
   if (V8_UNLIKELY(ShouldPrintMaglevGraph())) {
     PrintMaglevGraph(Phase::phase_name());
+  }
+  if (compilation_info_->trace_json_enabled()) {
+    maglev::PrintMaglevGraphAsJSON(compilation_info_.get(), graph_,
+                                   Phase::phase_name());
   }
 #ifdef DEBUG
   maglev::GraphProcessor<maglev::MaglevGraphVerifier> verifier(
@@ -303,11 +326,32 @@ std::optional<maglev::Graph*> TurbolevFrontendPipeline::Run() {
   if (v8_flags.turbolev_non_eager_inlining) {
     if (!Run<InlinerPhase>()) return {};
   }
+  // TODO(victorgomes): Re-evaluate pipeline. Running the PostOptimizerPhase
+  // before the Truncation phase would make sense to make truncations better
+  // based on the optimizations that loop peeling enabled.
+  bool rerun_postoptimizer_phase = false;
+  if (v8_flags.turbolev_non_eager_loop_peeling) {
+    if (Run<LoopPeelerPhase>()) {
+      rerun_postoptimizer_phase = true;
+    }
+  }
   if (v8_flags.maglev_truncation && graph_->may_have_truncation()) {
     Run<TruncationPhase>();
+    rerun_postoptimizer_phase = true;
+  }
+  if (graph_->compilation_info()->flags().enable_truncated_int32_phis) {
+    // This only needs to run unless we have accurate usage hints.
+    // TODO(turbolev): sort out perf problems blocking
+    // https://chromium-review.git.corp.google.com/c/v8/v8/+/7595239 from
+    // landing.
+    rerun_postoptimizer_phase = true;
+  }
+  if (rerun_postoptimizer_phase) {
     Run<PostOptimizerPhase>(nullptr);
   }
-  Run<PhiUntaggingPhase>();
+  if (v8_flags.turbolev_untagged_phis) {
+    Run<PhiUntaggingPhase>();
+  }
   if (v8_flags.maglev_range_analysis) {
     maglev::NodeRanges ranges(graph_);
     Run<RangeAnalysisPhase>(ranges);

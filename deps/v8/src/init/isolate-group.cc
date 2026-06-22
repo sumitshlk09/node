@@ -4,26 +4,34 @@
 
 #include "src/init/isolate-group.h"
 
+#include <atomic>
+#include <cinttypes>
 #include <memory>
+#include <tuple>
 
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/once.h"
 #include "src/base/platform/memory.h"
 #include "src/base/platform/mutex.h"
+#include "src/base/platform/time.h"
 #include "src/common/ptr-compr-inl.h"
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 #include "src/execution/isolate.h"
+#include "src/execution/thread-id.h"
 #include "src/heap/code-range.h"
+#include "src/heap/local-heap-inl.h"
+#include "src/heap/local-heap.h"
 #include "src/heap/memory-pool.h"
+#include "src/heap/parked-scope.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/read-only-spaces.h"
-#include "src/sandbox/code-pointer-table-inl.h"
+#include "src/init/v8.h"
 #include "src/sandbox/sandbox.h"
 #include "src/utils/memcopy.h"
 #include "src/utils/utils.h"
 
 #ifdef V8_ENABLE_PARTITION_ALLOC
-#include <partition_alloc/partition_alloc.h>
+#include "third_party/partition_alloc/src/partition_alloc/partition_alloc.h"
 #endif
 
 namespace v8 {
@@ -132,7 +140,6 @@ IsolateGroup::~IsolateGroup() {
   }
 
 #ifdef V8_ENABLE_SANDBOX
-  code_pointer_table_.TearDown();
   trusted_range_.Free();
 #endif  // V8_ENABLE_SANDBOX
 
@@ -196,7 +203,6 @@ void IsolateGroup::Initialize(bool process_wide, Sandbox* sandbox) {
   trusted_pointer_compression_cage_ = &trusted_range_;
   sandbox_ = sandbox;
 
-  code_pointer_table()->Initialize();
   optimizing_compile_task_executor_ =
       std::make_unique<OptimizingCompileTaskExecutor>();
 
@@ -423,7 +429,8 @@ IsolateGroup* IsolateGroup::New() {
 
   IsolateGroup* group = new IsolateGroup;
 #ifdef V8_ENABLE_SANDBOX
-  Sandbox* sandbox = Sandbox::New(GetPlatformVirtualAddressSpace());
+  Sandbox* sandbox =
+      Sandbox::New(V8::GetCurrentPlatform(), GetPlatformVirtualAddressSpace());
   group->Initialize(false, sandbox);
 #else
   group->Initialize(false);
@@ -546,6 +553,35 @@ void* SandboxedArrayBufferAllocator::AllocateUninitialized(size_t length) {
   return Allocate(length);
 }
 
+void* SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash(
+    size_t length) {
+  base::MutexGuard guard(&mutex_);
+
+  length = RoundUp(length, kAllocationGranularity);
+  Address region = region_alloc_->AllocateRegion(length);
+  if (region == base::RegionAllocator::kAllocationFailure) {
+    V8::FatalProcessOutOfMemory(
+        nullptr,
+        "SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash()");
+  }
+
+  // Check if the memory is inside the accessible region. If not, grow it.
+  Address end = region + length;
+  if (end > end_of_accessible_region_) {
+    Address new_end_of_accessible_region = RoundUp(end, kChunkSize);
+    size_t size = new_end_of_accessible_region - end_of_accessible_region_;
+    if (!sandbox_->address_space()->SetPagePermissions(
+            end_of_accessible_region_, size, PagePermissions::kReadWrite)) {
+      V8::FatalProcessOutOfMemory(
+          nullptr,
+          "SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash()");
+    }
+    end_of_accessible_region_ = new_end_of_accessible_region;
+  }
+
+  return reinterpret_cast<void*>(region);
+}
+
 void SandboxedArrayBufferAllocator::Free(void* data) {
   base::MutexGuard guard(&mutex_);
   region_alloc_->FreeRegion(reinterpret_cast<Address>(data));
@@ -595,6 +631,13 @@ class PABackedSandboxedArrayBufferAllocator::Impl final {
     opts.backup_ref_ptr = partition_alloc::PartitionOptions::kDisabled;
     opts.use_configurable_pool = partition_alloc::PartitionOptions::kAllowed;
     partition_.init(std::move(opts));
+
+    // Also adjust the limits for dirty bytes and slot span ring size in the
+    // ArrayBuffer partition root assuming we are running foregrounded.
+    constexpr int kForegroundMaxEmptySlotSpansDirtyBytesShift = 2;
+    partition_.root()->AdjustSlotSpanRing(
+        partition_alloc::internal::kMaxEmptySlotSpanRingSize,
+        kForegroundMaxEmptySlotSpansDirtyBytesShift);
   }
 
   Impl(const Impl&) = delete;
@@ -611,6 +654,10 @@ class PABackedSandboxedArrayBufferAllocator::Impl final {
     constexpr partition_alloc::AllocFlags flags =
         partition_alloc::AllocFlags::kReturnNull;
     return AllocateInternal<flags>(length);
+  }
+
+  void* AllocateUninitializedOrCrash(size_t length) {
+    return AllocateInternal<partition_alloc::AllocFlags::kNone>(length);
   }
 
   void Free(void* data) {
@@ -659,6 +706,12 @@ void* PABackedSandboxedArrayBufferAllocator::AllocateUninitialized(
   return impl_->AllocateUninitialized(length);
 }
 
+void* PABackedSandboxedArrayBufferAllocator::AllocateUninitializedOrCrash(
+    size_t length) {
+  DCHECK(impl_);
+  return impl_->AllocateUninitializedOrCrash(length);
+}
+
 void PABackedSandboxedArrayBufferAllocator::Free(void* data) {
   DCHECK(impl_);
   return impl_->Free(data);
@@ -681,6 +734,115 @@ IsolateGroup::GetSandboxedArrayBufferAllocator() {
 OptimizingCompileTaskExecutor*
 IsolateGroup::optimizing_compile_task_executor() {
   return optimizing_compile_task_executor_.get();
+}
+
+void IsolateGroup::SetBlockAtSynchronizationPointForTesting(
+    std::string synchronization_point, base::TimeDelta timeout) {
+  any_synchronization_point_for_testing_ = true;
+  base::MutexGuard lock(&synchronization_point_mutex_for_testing_);
+  auto& data =
+      synchronization_point_data_for_testing_[std::move(synchronization_point)];
+  if (!data) {
+    data = std::make_unique<SynchronizationPointDataForTesting>();
+  }
+  data->block_requested = true;
+  data->block_requester_thread = ThreadId::Current();
+  data->block_timeout = timeout;
+}
+
+bool IsolateGroup::ResumeSynchronizationPointForTesting(
+    std::string_view synchronization_point) {
+  base::MutexGuard lock(&synchronization_point_mutex_for_testing_);
+  auto it = synchronization_point_data_for_testing_.find(synchronization_point);
+  if (it == synchronization_point_data_for_testing_.end()) return false;
+  auto* data = it->second.get();
+  if (!data->block_requested) return false;
+  data->block_requested = false;
+  data->cv.NotifyAll();
+  return true;
+}
+
+bool IsolateGroup::WaitUntilBlockedForTesting(
+    std::string_view synchronization_point, base::TimeDelta timeout,
+    bool& timed_out) {
+  bool success = false;
+  auto wait_loop = [this, synchronization_point, timeout, &timed_out,
+                    &success]() {
+    base::MutexGuard lock(&synchronization_point_mutex_for_testing_);
+    auto it =
+        synchronization_point_data_for_testing_.find(synchronization_point);
+    if (it == synchronization_point_data_for_testing_.end()) return;
+    auto* data = it->second.get();
+    if (!data->block_requested && data->blocked_threads == 0) return;
+
+    const base::TimeTicks start = base::TimeTicks::Now();
+    while (data->blocked_threads == 0) {
+      const base::TimeDelta remaining =
+          start + timeout - base::TimeTicks::Now();
+      if (remaining <= base::TimeDelta()) {
+        timed_out = true;
+        return;
+      }
+      std::ignore = data->cv.WaitFor(&synchronization_point_mutex_for_testing_,
+                                     remaining);
+    }
+    success = true;
+  };
+
+  LocalHeap* local_heap = LocalHeap::Current();
+  if (local_heap && local_heap->IsRunning()) {
+    local_heap->ExecuteWhileParked(wait_loop);
+  } else {
+    wait_loop();
+  }
+  return success;
+}
+
+void IsolateGroup::DoSynchronizationPointForTesting(
+    std::string_view synchronization_point) {
+  if (!any_synchronization_point_for_testing_.load(std::memory_order_relaxed))
+      [[likely]] {
+    return;
+  }
+
+  // Safe: map elements are never removed, so the pointer is stable.
+  SynchronizationPointDataForTesting* data = nullptr;
+  {
+    base::MutexGuard lock(&synchronization_point_mutex_for_testing_);
+    auto it =
+        synchronization_point_data_for_testing_.find(synchronization_point);
+    if (it == synchronization_point_data_for_testing_.end()) return;
+    data = it->second.get();
+    if (!data->block_requested) return;
+    if (data->block_requester_thread == ThreadId::Current()) {
+      base::OS::PrintError(
+          "Warning: ignoring self-deadlock at synchronization point '%.*s'\n",
+          static_cast<int>(synchronization_point.length()),
+          synchronization_point.data());
+      return;
+    }
+  }
+
+  base::TimeTicks start = base::TimeTicks::Now();
+  base::MutexGuard lock(&synchronization_point_mutex_for_testing_);
+  ++data->blocked_threads;
+  data->cv.NotifyAll();
+  while (data->block_requested) {
+    base::TimeDelta remaining =
+        start + data->block_timeout - base::TimeTicks::Now();
+    if (remaining <= base::TimeDelta()) break;
+    std::ignore =
+        data->cv.WaitFor(&synchronization_point_mutex_for_testing_, remaining);
+  }
+  --data->blocked_threads;
+
+  if (data->block_requested) {
+    base::OS::PrintError(
+        "Warning: Synchronization point '%.*s' timed out after %" PRId64
+        " ms. Resuming automatically.\n",
+        static_cast<int>(synchronization_point.length()),
+        synchronization_point.data(), data->block_timeout.InMilliseconds());
+  }
 }
 
 }  // namespace internal

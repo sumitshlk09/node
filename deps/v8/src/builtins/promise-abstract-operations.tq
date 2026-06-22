@@ -12,12 +12,6 @@ extern transitioning runtime RejectPromise(
 extern transitioning runtime PromiseRevokeReject(
     implicit context: Context)(JSPromise): JSAny;
 
-extern transitioning runtime PromiseRejectAfterResolved(
-    implicit context: Context)(JSPromise, JSAny): JSAny;
-
-extern transitioning runtime PromiseResolveAfterResolved(
-    implicit context: Context)(JSPromise, JSAny): JSAny;
-
 extern transitioning runtime PromiseRejectEventFromStack(
     implicit context: Context)(JSPromise, JSAny): JSAny;
 }
@@ -156,6 +150,19 @@ transitioning macro MorphAndEnqueuePromiseReaction(
 transitioning macro TriggerPromiseReactions(
     implicit context: Context)(reactions: Zero|PromiseReaction,
     argument: JSAny, reactionType: constexpr PromiseReactionType): void {
+  // Fast path for 0 or 1 reaction.
+  typeswitch (reactions) {
+    case (Zero): {
+      return;
+    }
+    case (reaction: PromiseReaction): {
+      if (TaggedEqual(reaction.next, kZero)) {
+        MorphAndEnqueuePromiseReaction(reaction, argument, reactionType);
+        return;
+      }
+    }
+  }
+
   // We need to reverse the {reactions} here, since we record them on the
   // JSPromise in the reverse order.
   let current = reactions;
@@ -406,7 +413,7 @@ transitioning javascript builtin PromiseCapabilityDefaultReject(
 
   // 4. If alreadyResolved.[[Value]] is true, return undefined.
   if (alreadyResolved == True) {
-    return runtime::PromiseRejectAfterResolved(promise, reason);
+    return Undefined;
   }
 
   // 5. Set alreadyResolved.[[Value]] to true.
@@ -434,7 +441,7 @@ transitioning javascript builtin PromiseCapabilityDefaultResolve(
 
   // 4. If alreadyResolved.[[Value]] is true, return undefined.
   if (alreadyResolved == True) {
-    return runtime::PromiseResolveAfterResolved(promise, resolution);
+    return Undefined;
   }
 
   // 5. Set alreadyResolved.[[Value]] to true.
